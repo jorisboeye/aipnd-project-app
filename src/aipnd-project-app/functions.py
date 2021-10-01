@@ -1,10 +1,10 @@
 import json
 import time
+from collections import OrderedDict
 
 import torch
+from torch import nn, optim
 from torchvision import datasets, models, transforms
-
-from architectures import CLASSIFIERS
 
 
 def generate_data_directories(data_dir):
@@ -74,10 +74,10 @@ def generate_datasets(data_dir, architecture):
         yield phase, datasets.ImageFolder(path, transform=data_transforms[phase])
 
 
-def generate_data(data_dir, architecture):
+def generate_data(data_dir, architecture, batch_size):
     for phase, dataset in generate_datasets(data_dir, architecture):
         loader = torch.utils.data.DataLoader(
-            dataset, batch_size=64, shuffle=phase == "train"
+            dataset, batch_size=batch_size, shuffle=phase == "train"
         )
         phase_data = {
             "loader": loader,
@@ -87,22 +87,49 @@ def generate_data(data_dir, architecture):
         yield phase, phase_data
 
 
-def initialize_model(architecture, classifier, class_to_idx):
-    model = getattr(models, architecture)
-    model = model(pretrained=True)
+def adapt_classifier(model, dropout=0.2):
+    if not isinstance(model.classifier, nn.Sequential):
+        if model.classifier:
+            classifier = nn.Sequential(OrderedDict([("0", model.classifier)]))
+        else:
+            classifier = nn.Sequential()
+    else:
+        classifier = model.classifier
+    hidden_units = (
+        classifier[-1].out_features,
+        *model.hidden_units,
+        len(model.class_to_idx),
+    )
+    for input_units, output_units in zip(hidden_units[:], hidden_units[1:]):
+        classifier.add_module(str(len(classifier)), nn.ReLU())
+        classifier.add_module(str(len(classifier)), nn.Dropout(dropout))
+        classifier.add_module(
+            str(len(classifier)), nn.Linear(input_units, output_units)
+        )
+    classifier.add_module(str(len(classifier)), nn.LogSoftmax(dim=1))
+    return classifier
+
+
+def initialize_model(pretrained_network_name, class_to_idx, *hidden_units):
+    pretrained_network = getattr(models, pretrained_network_name)
+    model = pretrained_network(pretrained=True)
     for param in model.parameters():
         param.requires_grad = False
-    model.classifier = CLASSIFIERS[classifier]
     model.class_to_idx = class_to_idx
     model.idx_to_class = {v: k for k, v in class_to_idx.items()}
     model.best_accuracy = 0.0
+    model.hidden_units = hidden_units
+    model.pretrained_network_name = pretrained_network_name
+    model.classifier = adapt_classifier(model)
     return model
 
 
 def save_checkpoint(model, optimizer, filepath, epoch):
     checkpoint = {
         "epoch": epoch,
+        "pretrained_network_name": model.pretrained_network_name,
         "class_to_idx": model.class_to_idx,
+        "hidden_units": model.hidden_units,
         "state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "best_accuracy": model.best_accuracy,
@@ -110,12 +137,17 @@ def save_checkpoint(model, optimizer, filepath, epoch):
     torch.save(checkpoint, filepath)
 
 
-def load_checkpoint(model, optimizer, filepath):
+def load_checkpoint(filepath):
     checkpoint = torch.load(filepath)
+    model = initialize_model(
+        checkpoint["pretrained_network_name"],
+        checkpoint["class_to_idx"],
+        *checkpoint["hidden_units"],
+    )
     model.to(get_device())
     model.load_state_dict(checkpoint["state_dict"])
-    model.class_to_idx = checkpoint["class_to_idx"]
     model.best_accuracy = checkpoint["best_accuracy"]
+    optimizer = optim.Adam(model.classifier.parameters())
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     epoch = checkpoint["epoch"] + 1
     return model, optimizer, epoch
@@ -188,7 +220,7 @@ def train_model(
                 device=device,
             )
 
-            # save the checkpoint if accuracy improved
+            # save the best checkpoint if validation accuracy improved
             if phase == "valid" and phase_accuracy > model.best_accuracy:
                 model.best_accuracy = phase_accuracy
                 save_checkpoint(
@@ -197,7 +229,7 @@ def train_model(
                     filepath=checkpoint.replace(".pth", "_best.pth"),
                     epoch=epoch,
                 )
-        # save the checkpoint
+        # save the latest checkpoint to resume training at a later stage.
         save_checkpoint(
             model=model, optimizer=optimizer, filepath=checkpoint, epoch=epoch,
         )
@@ -205,5 +237,4 @@ def train_model(
         print(f"Training time: {training_time // 60:.0f}m {training_time % 60:.0f}s")
         print("Best val Acc: {:4f}\n".format(model.best_accuracy))
 
-    # load best model weights
     return model, optimizer
