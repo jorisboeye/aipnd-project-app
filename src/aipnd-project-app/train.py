@@ -1,3 +1,9 @@
+"""
+Train script. Example usage:
+
+python train.py ./flowers --arch alexnet --gpu --hidden_units 512 256 --epochs 3
+
+"""
 import argparse
 import os
 
@@ -14,6 +20,9 @@ parser.add_argument("--hidden_units", nargs="+", type=int, default=[500, 250])
 parser.add_argument("--learning_rate", default=0.002)
 parser.add_argument("--epochs", type=int, default=5)
 parser.add_argument("--batch_size", type=int, default=32)
+parser.add_argument(
+    "--gpu", dest="device", action="store_const", const="cuda:0", default="cpu"
+)
 args = parser.parse_args()
 
 

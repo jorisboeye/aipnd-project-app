@@ -2,9 +2,13 @@ import json
 import time
 from collections import OrderedDict
 
+import numpy as np
 import torch
+from PIL import Image
 from torch import nn, optim
 from torchvision import datasets, models, transforms
+
+from architectures import ARCHITECTURES
 
 
 def generate_data_directories(data_dir):
@@ -88,18 +92,23 @@ def generate_data(data_dir, architecture, batch_size):
 
 
 def adapt_classifier(model, dropout=0.2):
-    if not isinstance(model.classifier, nn.Sequential):
-        if model.classifier:
+    if hasattr(model, "classifier") and model.classifier:
+        if not isinstance(model.classifier, nn.Sequential):
             classifier = nn.Sequential(OrderedDict([("0", model.classifier)]))
         else:
-            classifier = nn.Sequential()
+            classifier = model.classifier
+        hidden_units = (
+            classifier[-1].out_features,
+            *model.hidden_units,
+            len(model.class_to_idx),
+        )
     else:
-        classifier = model.classifier
-    hidden_units = (
-        classifier[-1].out_features,
-        *model.hidden_units,
-        len(model.class_to_idx),
-    )
+        classifier = nn.Sequential()
+        hidden_units = (
+            model.fc.out_features,
+            *model.hidden_units,
+            len(model.class_to_idx),
+        )
     for input_units, output_units in zip(hidden_units[:], hidden_units[1:]):
         classifier.add_module(str(len(classifier)), nn.ReLU())
         classifier.add_module(str(len(classifier)), nn.Dropout(dropout))
@@ -137,7 +146,9 @@ def save_checkpoint(model, optimizer, filepath, epoch):
     torch.save(checkpoint, filepath)
 
 
-def load_checkpoint(filepath):
+def load_checkpoint(filepath, device=None):
+    if device is None:
+        device = get_device()
     checkpoint = torch.load(filepath)
     model = initialize_model(
         checkpoint["pretrained_network_name"],
@@ -197,12 +208,13 @@ def model_phase(phase, model, criterion, optimizer, data, device):
 
 
 def train_model(
-    model, criterion, optimizer, data, checkpoint, epochs=10, start_epoch=0
+    model, criterion, optimizer, data, checkpoint, epochs=10, start_epoch=0, device=None
 ):
 
     start = time.time()
     phases = ["train", "valid"]
-    device = get_device()
+    if device is None:
+        device = get_device()
     model.to(device)
 
     for epoch in range(start_epoch, start_epoch + epochs):
@@ -238,3 +250,41 @@ def train_model(
         print("Best val Acc: {:4f}\n".format(model.best_accuracy))
 
     return model, optimizer
+
+
+def process_image(image, architecture):
+    """Scales, crops, and normalizes a PIL image for a PyTorch model,
+    returns an Numpy array
+    """
+    architecture = ARCHITECTURES[architecture]
+    size = tuple(x * architecture["resize"] // min(image.size) for x in image.size)
+    image.thumbnail(size)
+    left = int(image.size[0] / 2 - architecture["cropsize"] / 2)
+    upper = int(image.size[1] / 2 - architecture["cropsize"] / 2)
+    right = left + architecture["cropsize"]
+    lower = upper + architecture["cropsize"]
+    image = image.crop((left, upper, right, lower))
+    mean = np.array(architecture["mean"])
+    std = np.array(architecture["std"])
+    return np.transpose((np.array(image) / 255 - mean) / std, (2, 0, 1))
+
+
+def predict(image_path, checkpoint, topk=5, device=None, cat_to_name=None):
+    model, _, _ = load_checkpoint(checkpoint, device=device)
+    model.eval()
+    if device is None:
+        device = get_device()
+    inputs = torch.Tensor(
+        process_image(
+            Image.open(image_path), architecture=model.pretrained_network_name
+        )
+    ).to(device)
+    # TODO: Implement the code to predict the class from an image file
+    outputs = model(inputs[None, :, :, :])
+    ps = torch.exp(outputs)
+    top_p, top_idx = ps.topk(topk, dim=1)
+    probs = list(top_p.cpu().detach().numpy()[0])
+    classes = [model.idx_to_class[idx] for idx in top_idx.cpu().numpy()[0]]
+    if cat_to_name is not None:
+        classes = [cat_to_name[c] for c in classes]
+    return probs, classes
