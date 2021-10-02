@@ -155,7 +155,7 @@ def load_checkpoint(filepath, device=None):
         checkpoint["class_to_idx"],
         *checkpoint["hidden_units"],
     )
-    model.to(get_device())
+    model.to(device)
     model.load_state_dict(checkpoint["state_dict"])
     model.best_accuracy = checkpoint["best_accuracy"]
     optimizer = optim.Adam(model.classifier.parameters())
@@ -279,7 +279,6 @@ def predict(image_path, checkpoint, topk=5, device=None, cat_to_name=None):
             Image.open(image_path), architecture=model.pretrained_network_name
         )
     ).to(device)
-    # TODO: Implement the code to predict the class from an image file
     outputs = model(inputs[None, :, :, :])
     ps = torch.exp(outputs)
     top_p, top_idx = ps.topk(topk, dim=1)
